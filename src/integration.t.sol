@@ -1,15 +1,17 @@
 pragma solidity ^0.5.12;
 
 import "ds-test/test.sol";
-import {DssDeployTestBase, DSValue} from "dss-deploy/DssDeploy.t.base.sol";
+import { DssDeployTestBase, DSValue } from "dss-deploy/DssDeploy.t.base.sol";
 import "dss-add-ilk-spell/DssAddIlkSpell.sol";
 
-import "tinlake/test/system/base_system.sol";
+import { BaseSystemTest } from "tinlake/test/system/base_system.sol";
+import { TokenLike } from "tinlake/test/system/setup.sol";
+import { Hevm } from "tinlake/test/system/interfaces.sol";
 
-import {TinlakeJoin} from "tinlake-maker-lib/join.sol";
-import {TinlakeFlipper} from "tinlake-maker-lib/flip.sol";
+import { TinlakeJoin } from "tinlake-maker-lib/join.sol";
+import { TinlakeFlipper } from "tinlake-maker-lib/flip.sol";
 
-import {PipLike} from "dss/spot.sol";
+import { PipLike } from "dss/spot.sol";
 
 contract DssAddIlkSpellTest is DssDeployTestBase, BaseSystemTest {
     Hevm public hevm;
@@ -27,28 +29,31 @@ contract DssAddIlkSpellTest is DssDeployTestBase, BaseSystemTest {
 
         hevm = Hevm(0x7109709ECfa91a80626fF3989D68f67F5b1DD12D);
         hevm.warp(1234567);
+
+        currency = TokenLike(address(dai));
+        currency_ = address(dai);
+
+        // mint 600 DAI with ETH to set up the pool
+        weth.deposit.value(10 ether)();
+        weth.approve(address(ethJoin), uint(-1));
+        ethJoin.join(address(this), 10 ether);
+        vat.frob("ETH", address(this), address(this), address(this), 5 ether, 600 ether);
+        vat.hope(address(daiJoin));
+        daiJoin.exit(address(this), 600 ether);
+
+        // Set up Tinlake contracts
         deployLenderMockBorrower(address(this));
-        createInvestorUser();
 
-        uint seniorAmount =  82 ether;
-        uint juniorAmount = 18 ether;
-        seniorSupply(seniorAmount, seniorInvestor);
-        juniorSupply(juniorAmount);
-        hevm.warp(now + 1 days);
 
-        coordinator.closeEpoch();
-        // no submission required
-        // submission was valid
-        assertTrue(coordinator.submissionPeriod() == false);
-        // inital token price is ONE
-        (uint payoutCurrencyAmount, uint payoutTokenAmount, uint remainingSupplyCurrency,  uint remainingRedeemToken) = seniorInvestor.disburse();
-
+        // Set up spell
         dropJoin = new TinlakeJoin(address(vat), ilk, address(seniorToken));
         dropPip = new DSValue();
         dropPip.poke(bytes32(uint(300 ether)));
-        dropFlip = new TinlakeFlipper(address(vat), ilk);
+        dropFlip = new TinlakeFlipper(address(vat), ilk, address(seniorToken), address(dai), address(dropJoin), address(daiJoin), address(seniorOperator), address(seniorTranche));
         dropFlip.rely(address(pause.proxy()));
         dropFlip.deny(address(this));
+        seniorMemberlist.updateMember(address(dropJoin), safeAdd(now, 20 days));
+        seniorMemberlist.updateMember(address(dropFlip), safeAdd(now, 20 days));
 
         spell = new DssAddIlkSpell(
             ilk,
@@ -77,23 +82,20 @@ contract DssAddIlkSpellTest is DssDeployTestBase, BaseSystemTest {
         spell.schedule();
         spell.cast();
 
-        seniorToken.approve(address(dropJoin), uint(-1));
-    }
+        createInvestorUser();
 
-    function seniorSupply(uint currencyAmount, Investor investor) public {
-        seniorMemberlist.updateMember(seniorInvestor_, safeAdd(now, 8 days));
-        currency.mint(address(seniorInvestor), currencyAmount);
-        investor.supplyOrder(currencyAmount);
-        (,uint supplyAmount, ) = seniorTranche.users(address(investor));
-        assertEq(supplyAmount, currencyAmount);
-    }
-
-    function juniorSupply(uint currencyAmount) public {
         juniorMemberlist.updateMember(juniorInvestor_, safeAdd(now, 8 days));
-        currency.mint(address(juniorInvestor), currencyAmount);
-        juniorInvestor.supplyOrder(currencyAmount);
-        (,uint supplyAmount, ) = juniorTranche.users(juniorInvestor_);
-        assertEq(supplyAmount, currencyAmount);
+        currency.transferFrom(address(this), address(juniorInvestor), 18 ether);
+        juniorInvestor.supplyOrder(18 ether);
+
+        seniorMemberlist.updateMember(address(this), safeAdd(now, 8 days));
+        currency.approve(address(seniorTranche), 82 ether);
+        seniorOperator.supplyOrder(82 ether);
+        hevm.warp(now + 1 days);
+        coordinator.closeEpoch();
+        seniorOperator.disburse();
+
+        seniorToken.approve(address(dropJoin), uint(-1));
     }
 
     function testVariables() public {
@@ -112,41 +114,35 @@ contract DssAddIlkSpellTest is DssDeployTestBase, BaseSystemTest {
     }
 
     function testFrob() public {
-        assertEq(dai.balanceOf(address(this)), 0);
+        assertEq(dai.balanceOf(address(this)), 500 ether);
         dropJoin.join(address(this), 1 ether);
 
         vat.frob(ilk, address(this), address(this), address(this), 1 ether, 100 ether);
 
         vat.hope(address(daiJoin));
         daiJoin.exit(address(this), 100 ether);
-        assertEq(dai.balanceOf(address(this)), 100 ether);
+        assertEq(dai.balanceOf(address(this)), 600 ether);
     }
 
     function testFlip() public {
-        this.file(address(cat), ilk, "lump", 1 ether); // 1 unit of collateral per batch
+        assertEq(address(seniorTranche), address(seniorOperator.tranche()));
+        this.file(address(cat), ilk, "lump", uint(1 ether)); // 1 unit of collateral per batch
         this.file(address(cat), ilk, "chop", ONE);
         dropJoin.join(address(this), 1 ether);
-        vat.frob(ilk, address(this), address(this), address(this), 1 ether, 200 ether); // Maximun DAI generated
-        dropPip.poke(bytes32(uint(300 ether - 1))); // Decrease price in 1 wei
+        vat.frob(ilk, address(this), address(this), address(this), 1 ether, 1 ether); // Maximun DAI generated
+        dropPip.poke(bytes32(uint(1)));
         spotter.poke(ilk);
         assertEq(vat.gem(ilk, address(dropFlip)), 0);
         uint batchId = cat.bite(ilk, address(this));
-        assertEq(vat.gem(ilk, address(dropFlip)), 1 ether);
+        (uint epoch, uint supplyOrd, uint redeemOrd) = seniorTranche.users(address(dropFlip));
+        assertEq(redeemOrd, 1 ether);
 
-        address(user1).transfer(10 ether);
-        user1.doEthJoin(address(weth), address(ethJoin), address(user1), 10 ether);
-        user1.doFrob(address(vat), "ETH", address(user1), address(user1), address(user1), 10 ether, 1000 ether);
+        hevm.warp(now + 1 days);
+        coordinator.closeEpoch();
 
-        address(user2).transfer(10 ether);
-        user2.doEthJoin(address(weth), address(ethJoin), address(user2), 10 ether);
-        user2.doFrob(address(vat), "ETH", address(user2), address(user2), address(user2), 10 ether, 1000 ether);
+        assertEq(dropFlip.tab(), 1 ether * 10**27);
+        dropFlip.take();
+        assertEq(dropFlip.tab(), 0);
 
-        user1.doHope(address(vat), address(dropFlip));
-        user2.doHope(address(vat), address(dropFlip));
-
-        user1.doTend(address(dropFlip), batchId, 1 ether, rad(100 ether));
-        user2.doTend(address(dropFlip), batchId, 1 ether, rad(140 ether));
-        user1.doTend(address(dropFlip), batchId, 1 ether, rad(180 ether));
-        user2.doTend(address(dropFlip), batchId, 1 ether, rad(200 ether));
     }
 }
