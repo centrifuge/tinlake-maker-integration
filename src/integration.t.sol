@@ -9,6 +9,7 @@ import { TokenLike } from "tinlake/test/system/setup.sol";
 import { SimpleToken } from "tinlake/test/simple/token.sol";
 import { Hevm } from "tinlake/test/system/interfaces.sol";
 
+import { TinlakeManager } from "tinlake-maker-lib/mgr.sol";
 /* import { TinlakeJoin } from "tinlake-maker-lib/join.sol"; */
 /* import { TinlakeFlipper } from "tinlake-maker-lib/flip.sol"; */
 
@@ -21,7 +22,7 @@ contract DssAddIlkSpellTest is DssDeployTestBase, BaseSystemTest {
 
     bytes32 constant ilk = "TEST-DROP"; // New Collateral Type
     /* TinlakeJoin     dropJoin; */
-    /* TinlakeFlipper  dropFlip; */
+    TinlakeManager  dropMgr;
     DSValue         dropPip;
 
     function setUp() public {
@@ -47,14 +48,14 @@ contract DssAddIlkSpellTest is DssDeployTestBase, BaseSystemTest {
 
 
         // Set up spell
-        //        dropJoin = new TinlakeJoin(address(vat), ilk, address(seniorToken));
+        dropMgr = new TinlakeManager(address(vat), address(dai), address(vow),
+                                     address(daiJoin), address(seniorOperator), address(seniorToken), address(assessor),
+                                     ilk, address(this));
         dropPip = new DSValue();
         dropPip.poke(bytes32(uint(300 ether)));
-        /* dropFlip = new TinlakeFlipper(address(vat), ilk, address(seniorToken), address(dai), address(dropJoin), address(daiJoin), address(seniorOperator), address(seniorTranche)); */
-        /* dropFlip.rely(address(pause.proxy())); */
-        /* dropFlip.deny(address(this)); */
-        /* seniorMemberlist.updateMember(address(dropJoin), safeAdd(now, 20 days)); */
-        /* seniorMemberlist.updateMember(address(dropFlip), safeAdd(now, 20 days)); */
+        dropMgr.rely(address(pause.proxy()));
+        dropMgr.deny(address(this));
+        seniorMemberlist.updateMember(address(dropMgr), safeAdd(now, 20 days));
 
         spell = new DssAddIlkSpell(
             ilk,
@@ -65,16 +66,16 @@ contract DssAddIlkSpellTest is DssDeployTestBase, BaseSystemTest {
                 address(jug),
                 address(spotter),
                 address(end),
-                address(0xacab), //address(dropJoin),
+                address(dropMgr),
                 address(dropPip),
-                address(0xacab) //address(dropFlip)
+                address(dropMgr)
             ],
             [
                 10000 * 10 ** 45, // line
                 1500000000 ether, // mat
                 1.05 * 10 ** 27, // tax
                 ONE, // chop
-                10000 ether // lump
+                10000 ether // lump (should probably be set to uint(-1)
             ]
         );
 
@@ -86,6 +87,8 @@ contract DssAddIlkSpellTest is DssDeployTestBase, BaseSystemTest {
         createInvestorUser();
 
         juniorMemberlist.updateMember(juniorInvestor_, safeAdd(now, 8 days));
+
+        currency.mint(address(this), 100 ether);
         currency.transferFrom(address(this), address(juniorInvestor), 18 ether);
         juniorInvestor.supplyOrder(18 ether);
 
@@ -96,34 +99,41 @@ contract DssAddIlkSpellTest is DssDeployTestBase, BaseSystemTest {
         coordinator.closeEpoch();
         seniorOperator.disburse();
 
-        //        seniorToken.approve(address(dropJoin), uint(-1));
+        seniorToken.approve(address(dropMgr), uint(-1));
+        dai.approve(address(dropMgr), uint(-1));
     }
 
-    /* function testVariables() public { */
-    /*     (,,,uint line,) = vat.ilks(ilk); */
-    /*     assertEq(line, uint(10000 * 10 ** 45)); */
-    /*     (PipLike pip, uint mat) = spotter.ilks(ilk); */
-    /*     assertEq(address(pip), address(dropPip)); */
-    /*     assertEq(mat, uint(1500000000 ether)); */
-    /*     (uint tax,) = jug.ilks(ilk); */
-    /*     assertEq(tax, uint(1.05 * 10 ** 27)); */
-    /*     (address flip, uint chop, uint lump) = cat.ilks(ilk); */
-    /*     assertEq(flip, address(dropFlip)); */
-    /*     assertEq(chop, ONE); */
-    /*     assertEq(lump, uint(10000 ether)); */
-    /*     assertEq(vat.wards(address(dropJoin)), 1); */
-    /* } */
+    function testVariables() public {
+        (,,,uint line,) = vat.ilks(ilk);
+        assertEq(line, uint(10000 * 10 ** 45));
+        (PipLike pip, uint mat) = spotter.ilks(ilk);
+        assertEq(address(pip), address(dropPip));
+        assertEq(mat, uint(1500000000 ether));
+        (uint tax,) = jug.ilks(ilk);
+        assertEq(tax, uint(1.05 * 10 ** 27));
+        (address flip, uint chop, uint lump) = cat.ilks(ilk);
+        assertEq(flip, address(dropMgr));
+        assertEq(chop, ONE);
+        assertEq(lump, uint(10000 ether));
+        assertEq(vat.wards(address(dropMgr)), 1);
+    }
 
-    /* function testFrob() public { */
-    /*     assertEq(dai.balanceOf(address(this)), 500 ether); */
-    /*     dropJoin.join(address(this), 1 ether); */
+    function testJoinAndDraw() public {
+        assertEq(dai.balanceOf(address(this)), 600 ether);
+        assertEq(seniorToken.balanceOf(address(this)), 82 ether);
+        dropMgr.join(6 ether);
+        dropMgr.draw(2 ether);
+        assertEq(dai.balanceOf(address(this)), 602 ether);
+        assertEq(seniorToken.balanceOf(address(this)), 76 ether);
+    }
 
-    /*     vat.frob(ilk, address(this), address(this), address(this), 1 ether, 100 ether); */
-
-    /*     vat.hope(address(daiJoin)); */
-    /*     daiJoin.exit(address(this), 100 ether); */
-    /*     assertEq(dai.balanceOf(address(this)), 600 ether); */
-    /* } */
+    function testWipeAndExit() public {
+        testJoinAndDraw();
+        dropMgr.wipe(1 ether);
+        dropMgr.exit(address(this), 1 ether);
+        assertEq(dai.balanceOf(address(this)), 601 ether);
+        assertEq(seniorToken.balanceOf(address(this)), 77 ether);
+    }
 
     /* function testFlip() public { */
     /*     assertEq(address(seniorTranche), address(seniorOperator.tranche())); */
