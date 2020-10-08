@@ -6,6 +6,7 @@ import "dss-add-ilk-spell/DssAddIlkSpell.sol";
 
 import { BaseSystemTest } from "tinlake/test/system/base_system.sol";
 import { TokenLike } from "tinlake/test/system/setup.sol";
+import { TestRoot } from "tinlake/test/system/root.sol";
 import { SimpleToken } from "tinlake/test/simple/token.sol";
 import { Hevm } from "tinlake/test/system/interfaces.sol";
 
@@ -24,7 +25,7 @@ contract DssAddIlkSpellTest is DssDeployTestBase, BaseSystemTest {
     /* TinlakeJoin     dropJoin; */
     TinlakeManager  dropMgr;
     DSValue         dropPip;
-
+    
     function setUp() public {
         DssDeployTestBase.setUp();
         deploy();
@@ -44,17 +45,26 @@ contract DssAddIlkSpellTest is DssDeployTestBase, BaseSystemTest {
         daiJoin.exit(address(this), 600 ether);
 
         // Set up Tinlake contracts
-        deployLenderMockBorrower(address(this));
+        deployTestRoot();
+        deployCollateralNFT();
+        deployBorrower();
 
+        prepareDeployLender(root_);
+        deployLender();
+
+        root.prepare(address(lenderDeployer), address(borrowerDeployer), address(this));
+        root.deploy();
+        root.relyLenderAdmin(address(this));
 
         // Set up spell
         dropMgr = new TinlakeManager(address(vat), address(dai), address(vow),
-                                     address(daiJoin), address(seniorOperator), address(seniorToken), address(assessor),
-                                     ilk, address(this));
+                                     address(daiJoin), address(seniorOperator),
+                                     address(seniorToken), address(juniorToken), address(assessor),
+                                     ilk, address(this), address(seniorTranche));
         dropPip = new DSValue();
         dropPip.poke(bytes32(uint(300 ether)));
         dropMgr.rely(address(pause.proxy()));
-        dropMgr.deny(address(this));
+        //        dropMgr.deny(address(this));
         seniorMemberlist.updateMember(address(dropMgr), safeAdd(now, 20 days));
 
         spell = new DssAddIlkSpell(
@@ -88,7 +98,7 @@ contract DssAddIlkSpellTest is DssDeployTestBase, BaseSystemTest {
 
         juniorMemberlist.updateMember(juniorInvestor_, safeAdd(now, 8 days));
 
-        currency.mint(address(this), 100 ether);
+        //        currency.mint(address(this), 100 ether);
         currency.transferFrom(address(this), address(juniorInvestor), 18 ether);
         juniorInvestor.supplyOrder(18 ether);
 
@@ -119,11 +129,11 @@ contract DssAddIlkSpellTest is DssDeployTestBase, BaseSystemTest {
     }
 
     function testJoinAndDraw() public {
-        assertEq(dai.balanceOf(address(this)), 600 ether);
+        assertEq(dai.balanceOf(address(this)), 500 ether);
         assertEq(seniorToken.balanceOf(address(this)), 82 ether);
         dropMgr.join(6 ether);
         dropMgr.draw(2 ether);
-        assertEq(dai.balanceOf(address(this)), 602 ether);
+        assertEq(dai.balanceOf(address(this)), 502 ether);
         assertEq(seniorToken.balanceOf(address(this)), 76 ether);
     }
 
@@ -131,8 +141,39 @@ contract DssAddIlkSpellTest is DssDeployTestBase, BaseSystemTest {
         testJoinAndDraw();
         dropMgr.wipe(1 ether);
         dropMgr.exit(address(this), 1 ether);
-        assertEq(dai.balanceOf(address(this)), 601 ether);
+        assertEq(dai.balanceOf(address(this)), 501 ether);
         assertEq(seniorToken.balanceOf(address(this)), 77 ether);
+    }
+
+    function testTellAndUnwind() public {
+        testJoinAndDraw();
+        // we are authorized, so can call tell even if tellCondition is not met.
+        dropMgr.tell();
+        // all of the drop is in the redeemer now
+        assertEq(seniorToken.balanceOf(address(dropMgr)), 0);
+        hevm.warp(now + 2 days);
+        coordinator.closeEpoch();
+        dropMgr.unwind(2);
+        assertEq(dai.balanceOf(address(this)), 506 ether);
+    }
+
+    function testKick() public {
+        testJoinAndDraw();
+        dropMgr.tell();
+        dropPip.poke(bytes32(uint(1)));
+        spotter.poke(ilk);
+        cat.bite(ilk, address(dropMgr));
+        assertEq(vat.gem(ilk, address(dropMgr)), 6 ether);
+    }
+
+    function testRecover() public {
+        testKick();
+        hevm.warp(now + 2 days);
+        coordinator.closeEpoch();
+        dropMgr.recover(2);
+        // liquidation penalty is 0%
+        assertEq(dai.balanceOf(address(this)), 506 ether);
+        assertEq(dai.balanceOf(address(vow)), 0 ether);
     }
 
     /* function testFlip() public { */
